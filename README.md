@@ -1,2 +1,18 @@
 # cs434pset2
-temp readme
+
+Diss1a: Your transport protocol implementation picks an initial sequence number when establishing a new connection. This might be 1, or it could be a random value. Which is better, and why?
+The sequence number chosen technically does not matter. An outgoing SYN packet will still contain the information regarding the destination address, port, and host address, port. The only point of contention could the confusion of a failed packet with the same seq number as a non failed packet. In current implementations seq numbers are chosen at random in TCP.   
+
+Diss1b: Our connection setup protocol is vulnerable to the following attack. The attacker sends a large number of connection request (SYN) packets to a particular node, but never sends any data. (This is called a SYN flood.) What happens to your implementation if it were attacked in this way? How might you have designed the initial handshake protocol (or the protocol implementation) differently to be more robust to this attack?
+Our implementation would continue accepting connections, however it would be stuck in the ESTABLISHED state since no other data would be sent. A way to make our protocol be more robust would be to close these remaining connections if a timeout occurs. Another possible way would be to slow down the acceptance of SYN requests. This version would limit actual SYN requests from getting through but it would still make the system less vulnerable to overflow. 
+
+
+Diss1c: What happens in your implementation when a sender transfers data but never closes a connection? (This is called a FIN attack.) How might we design the protocol differently to better handle this case?
+We could design the protocol to timeout these connections if a FIN isn't received after the data is done transferring. The server can assume that the sender has somehow lost connection and that the socket is free to close so no future data will be spent. 
+
+Diss2: Your transport protocol implementation picks the size of a buffer for received data that is used as part of flow control. How large should this buffer be, and why?
+The size of this buffer can be variable depending on a determinstic output from a flow control heuristic. In its initial phase, the window size is determined and agreed upon during the three way handshake. In our case we have a one way handshake and this can be a set value. From here flow control and congestion control determine if the window size needs to be increased or decreased. This depends on the server processing and how many requests are being sent to the server. 
+
+Screen Shot 2021-10-29 at 9.05.30 PM (I am not sure if I could paste my state machine in this README, but I can also email it to you :) )
+
+The current state of my code is not fully functioning, however I was in my Professor's office hours all afternoon making great progress on the project. Currently, I have written bind, accept, connect, and listen written, along with the onReceive for TCPSock and TCPManager. I wrote the function that first parses Established sockets to find a connection and then listen sockets. Another point of my understanding today was that listen sockets simply create new sockets and they themselves are never changed until a FIN is sent to this socket. This is different than establishing a connection since you just create a socket when you receive a SYN. Furthermore, I completed the initial packet sending of a SYN and I was in the process of writing the case for processing ACKS. Tomorrow my plan will be to test the functionality of stop and wait and by the end of the day implement the sliding window and write the DATA and FIN case. 

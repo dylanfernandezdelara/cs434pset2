@@ -154,6 +154,10 @@ public class Node {
 	    this.receivePingReply(packet);
 	    break;
 
+    case Protocol.TRANSPORT_PKT:
+        tcpMan.onReceive(packet);
+        break;
+
 	default:
 	    logError("Packet with unknown protocol received. Protocol: " + packet.getProtocol());
 	}

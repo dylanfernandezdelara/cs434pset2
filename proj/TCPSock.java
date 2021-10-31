@@ -1,3 +1,5 @@
+import java.util.ArrayList;
+
 /**
  * <p>Title: CPSC 433/533 Programming Assignment</p>
  *
@@ -12,8 +14,18 @@
  */
 
 public class TCPSock {
+    // TCPManager of Socket
+    TCPManager tcpMan;
+    public int srcPort;
+    public int destPort;
+    public int srcAddr;
+    public int destAddr;
+
+    int currPendingConnections;
+    public ArrayList<TCPSock> backlogSockets;
+
     // TCP socket states
-    enum State {
+    public static enum State {
         // protocol states
         CLOSED,
         LISTEN,
@@ -21,9 +33,13 @@ public class TCPSock {
         ESTABLISHED,
         SHUTDOWN // close requested, FIN not sent (due to unsent data in queue)
     }
-    private State state;
+    public State state;
 
-    public TCPSock() {
+    public TCPSock(TCPManager tcpMan) {
+        this.tcpMan = tcpMan;
+        this.currPendingConnections = 0;
+        this.backlogSockets = new ArrayList<TCPSock>();
+        state = State.CLOSED;
     }
 
     /*
@@ -38,7 +54,11 @@ public class TCPSock {
      * @return int 0 on success, -1 otherwise
      */
     public int bind(int localPort) {
-        return -1;
+        int foundPort = tcpMan.findOpenPort(localPort);
+        this.srcPort = localPort;
+        this.state = State.CLOSED;
+        tcpMan.tcpSocksInUse.add(this);
+        return foundPort;
     }
 
     /**
@@ -47,7 +67,8 @@ public class TCPSock {
      * @return int 0 on success, -1 otherwise
      */
     public int listen(int backlog) {
-        return -1;
+        this.state = State.LISTEN;
+        return 0;
     }
 
     /**
@@ -56,7 +77,13 @@ public class TCPSock {
      * @return TCPSock The first established connection on the request queue
      */
     public TCPSock accept() {
-        return null;
+        if (backlogSockets.isEmpty()){
+            return null;
+        }
+        TCPSock firstOnQueue = backlogSockets.get(0);
+        backlogSockets.remove(0);
+        firstOnQueue.state = State.ESTABLISHED;
+        return firstOnQueue;
     }
 
     public boolean isConnectionPending() {
@@ -83,7 +110,15 @@ public class TCPSock {
      * @return int 0 on success, -1 otherwise
      */
     public int connect(int destAddr, int destPort) {
-        return -1;
+        byte[] transportPktPayload = {};
+        Transport transportPkt = new Transport(this.srcPort, destPort, 0, 1, 1, transportPktPayload);
+        tcpMan.node.sendSegment(tcpMan.addr, destAddr, Protocol.TRANSPORT_PKT, transportPkt.pack());
+        this.state = State.SYN_SENT;
+        this.destAddr = destAddr;
+        this.destPort = destPort;
+        this.srcAddr = tcpMan.addr;
+        // add timer here at some point ...
+        return 0;
     }
 
     /**
@@ -124,6 +159,34 @@ public class TCPSock {
      */
     public int read(byte[] buf, int pos, int len) {
         return -1;
+    }
+
+    public void onReceive(Transport transportPkt, Packet pkt){
+        int type = transportPkt.getType();
+        switch(type){
+            case 0: // SYN
+                byte[] transportPktPayload = {};
+                Transport replyPkt = new Transport(transportPkt.getDestPort(), transportPkt.getSrcPort(), 1, 1, 1, transportPktPayload);
+                tcpMan.node.sendSegment(pkt.getDest(), pkt.getSrc(), Protocol.TRANSPORT_PKT, replyPkt.pack());
+
+                TCPSock newSocket = new TCPSock(tcpMan);
+                newSocket.destAddr = pkt.getSrc();
+                newSocket.destPort = transportPkt.getSrcPort();
+                newSocket.srcAddr = pkt.getDest();
+                newSocket.srcPort = pkt.getSrc();
+
+                backlogSockets.add(newSocket);
+                break;
+            case 1: // ACK
+                if (this.state == State.SYN_SENT){
+                    this.state = State.ESTABLISHED;
+                }
+                break;
+            case 2: // FIN
+                break;
+            case 3: // DATA
+                break;
+        }
     }
 
     /*

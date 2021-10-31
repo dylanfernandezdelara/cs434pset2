@@ -1,3 +1,5 @@
+import java.util.ArrayList;
+
 /**
  * <p>Title: CPSC 433/533 Programming Assignment</p>
  *
@@ -11,9 +13,10 @@
  * @version 1.0
  */
 public class TCPManager {
-    private Node node;
-    private int addr;
+    public Node node;
+    public int addr;
     private Manager manager;
+    public ArrayList<TCPSock> tcpSocksInUse; 
 
     private static final byte dummy[] = new byte[0];
 
@@ -21,6 +24,7 @@ public class TCPManager {
         this.node = node;
         this.addr = addr;
         this.manager = manager;
+        this.tcpSocksInUse = new ArrayList<TCPSock>();
     }
 
     /**
@@ -41,7 +45,42 @@ public class TCPManager {
      *                 a local port
      */
     public TCPSock socket() {
-        return null;
+        TCPSock tcpSock = new TCPSock(this);
+        return tcpSock;
+    }
+
+    public int findOpenPort(int portNumber) {
+        for (int i = 0; i < tcpSocksInUse.size(); i++){
+            if (tcpSocksInUse.get(i).srcPort == portNumber){
+                return -1;
+            }
+        }
+        return 0;
+    }
+
+    public void onReceive(Packet packet){
+        Transport TRANSPORTpkt =  Transport.unpack(packet.getPayload());
+        int destPort = TRANSPORTpkt.getDestPort();
+        int destAddr = packet.getDest();
+        int srcPort = TRANSPORTpkt.getSrcPort();
+        int srcAddr = packet.getSrc();
+
+        for (int i = 0; i < tcpSocksInUse.size(); i++){
+            TCPSock tempSock = tcpSocksInUse.get(i);
+            if (tempSock.state == TCPSock.State.ESTABLISHED && (tempSock.destAddr == srcAddr) && (tempSock.destPort == srcPort)
+                    && (tempSock.srcAddr == destAddr) && (tempSock.srcPort == destPort)){
+                tempSock.onReceive(TRANSPORTpkt, packet);
+                return;
+            }
+        }
+        
+        for (int i = 0; i < tcpSocksInUse.size(); i++){
+            TCPSock tempSock = tcpSocksInUse.get(i);
+            if (tempSock.state == TCPSock.State.LISTEN && (tempSock.srcPort == destPort) ){
+                tempSock.onReceive(TRANSPORTpkt, packet);
+                return;
+            }
+        }
     }
 
     /*
