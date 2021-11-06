@@ -1,3 +1,7 @@
+import java.lang.reflect.Method;
+import java.nio.ByteBuffer;
+import java.rmi.server.RemoteObjectInvocationHandler;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 
 /**
@@ -21,8 +25,39 @@ public class TCPSock {
     public int srcAddr;
     public int destAddr;
 
+    public boolean rcvFinAck;
+
+    public int lastACKd;
+
+    public int sendbase;
+    public int sendMax;
+    public int writePointer;
+
+    public int bufferSz;
+    public int writeIndex;
+
+    public byte[] socketBuffer;
+    public boolean socketType; // 0 is receive, // 1 is send
+
+    // receiving socket
+    int rReadPointer;
+    int rWritePointer;
+
+    // sending socket
+
+    // windows
+    int rwnd; // amount of space receiving buffer has available
+    int swnd; // bytes sent but not acked
+
+    // max window size for sender
+    int cwnd; // window of bytes I am allowed to send
+    
     int currPendingConnections;
     public ArrayList<TCPSock> backlogSockets;
+
+    public int nextseq;
+    
+    public long startOfTimedWait;
 
     // TCP socket states
     public static enum State {
@@ -31,6 +66,7 @@ public class TCPSock {
         LISTEN,
         SYN_SENT,
         ESTABLISHED,
+        FIN_SENT,
         SHUTDOWN // close requested, FIN not sent (due to unsent data in queue)
     }
     public State state;
@@ -39,6 +75,23 @@ public class TCPSock {
         this.tcpMan = tcpMan;
         this.currPendingConnections = 0;
         this.backlogSockets = new ArrayList<TCPSock>();
+        this.bufferSz = 100;
+        this.socketBuffer = new byte[bufferSz];
+
+        this.sendbase = 0;
+        this.writePointer = 0;
+        this.lastACKd = 0;
+
+        this.rReadPointer = 0;
+        this.rWritePointer = 0;
+        
+        this.rwnd = 0;
+        this.cwnd = 50;
+
+        this.rcvFinAck = false;
+
+        this.nextseq = 0;
+
         state = State.CLOSED;
     }
 
@@ -83,6 +136,7 @@ public class TCPSock {
         TCPSock firstOnQueue = backlogSockets.get(0);
         backlogSockets.remove(0);
         firstOnQueue.state = State.ESTABLISHED;
+        tcpMan.tcpSocksInUse.add(firstOnQueue);
         return firstOnQueue;
     }
 
@@ -111,12 +165,15 @@ public class TCPSock {
      */
     public int connect(int destAddr, int destPort) {
         byte[] transportPktPayload = {};
-        Transport transportPkt = new Transport(this.srcPort, destPort, 0, 1, 1, transportPktPayload);
+        Transport transportPkt = new Transport(this.srcPort, destPort, 0, 1, 0, transportPktPayload);
         tcpMan.node.sendSegment(tcpMan.addr, destAddr, Protocol.TRANSPORT_PKT, transportPkt.pack());
         this.state = State.SYN_SENT;
         this.destAddr = destAddr;
         this.destPort = destPort;
         this.srcAddr = tcpMan.addr;
+        tcpMan.tcpSocksInUse.add(this);
+        //System.console().writer().println("S");
+        //this.tcpMan.node.logOutput("SENDING SYN TO CONNECT");
         // add timer here at some point ...
         return 0;
     }
@@ -125,12 +182,40 @@ public class TCPSock {
      * Initiate closure of a connection (graceful shutdown)
      */
     public void close() {
+        // waits for all data to be sent then sends the fin
+        this.state = State.SHUTDOWN; // state transfers to CLOSED once wp == sendmax == sendbase
+        if ( (writePointer == sendMax) && (sendMax == sendbase) ){
+            sendFinRT();
+            this.state = State.CLOSED;
+        } 
     }
 
     /**
      * Release a connection immediately (abortive shutdown)
      */
     public void release() {
+        // sends fin immediately
+        sendFinRT();
+    }
+
+    public void sendFinRT(){
+        byte [] emptyPayload = {};
+        Transport pkt = new Transport(this.srcPort, destPort, 2, 1, 99, emptyPayload);
+        if (rcvFinAck){
+            return;
+        }
+        try {
+            //tcpMan.node.logOutput("about to send segment! ");
+            tcpMan.node.sendSegment(srcAddr, destAddr, Protocol.TRANSPORT_PKT, pkt.pack());
+            this.state = State.FIN_SENT;
+            //System.console().writer().println(".");
+            Method method = Callback.getMethod("sendFinRT", this, null);
+	        Callback cb = new Callback(method, this, null);
+            this.tcpMan.manager.addTimer(this.tcpMan.node.getAddr(), 10000, cb);
+        }
+        catch(Exception e) {
+            System.err.println("Failed to add callback to sendFinRT");
+        }
     }
 
     /**
@@ -142,9 +227,33 @@ public class TCPSock {
      * @param len int number of bytes to write
      * @return int on success, the number of bytes written, which may be smaller
      *             than len; on failure, -1
-     */
+     */ // write from parameter buf into socket buffer
     public int write(byte[] buf, int pos, int len) {
-        return -1;
+        if (this.state == State.SYN_SENT){
+            return 0;
+        }
+        //tcpMan.node.logOutput(String.valueOf(len));
+        int bytesWritten = 0;
+        int remainingBufferSpace = bufferSz - ( (writePointer - sendbase) % bufferSz);
+        //tcpMan.node.logOutput("WRITE POINTER " + writePointer + " SENDBASE " + sendbase
+        //+ " POS " + pos + " LEN " + len);
+        //tcpMan.node.logOutput("REMAINING BUFFER SPACE PREWRITE " + String.valueOf(remainingBufferSpace));
+        int iterator = 0;
+        while (iterator < len && remainingBufferSpace > 0){
+                socketBuffer[writePointer % bufferSz] = buf[pos];
+                //tcpMan.node.logOutput("entering buf " + socketBuffer[writePointer % bufferSz]);
+                bytesWritten++;
+                pos++;
+                writePointer++;
+                iterator++;
+                remainingBufferSpace--;
+        }
+        //if (remainingBufferSpace != 0) tcpMan.node.logOutput("REMAINING BUFFER SPACE POSTWRITE " + String.valueOf(remainingBufferSpace));
+        
+        transmitData();
+
+        //tcpMan.node.logOutput("BYTES WRITTEN: " + String.valueOf(bytesWritten));        
+        return bytesWritten;
     }
 
     /**
@@ -156,35 +265,238 @@ public class TCPSock {
      * @param len int number of bytes to read
      * @return int on success, the number of bytes read, which may be smaller
      *             than len; on failure, -1
-     */
+     */ // read from socket buffer
     public int read(byte[] buf, int pos, int len) {
-        return -1;
+        int bytesRead = 0;
+        int iterator = 0;
+        //tcpMan.node.logOutput("WRITE POINTER VAL "+String.valueOf(rWritePointer));
+        while (iterator < len && rReadPointer < rWritePointer){
+            buf[pos] = socketBuffer[rReadPointer % bufferSz];
+            //tcpMan.node.logOutput("read to buf result " + buf[pos]);
+            rReadPointer++;
+            bytesRead++;
+            pos++;
+            iterator++;
+        }
+        return bytesRead;
     }
+
+    public void transmitData(){
+        // int bytesForEachPacket = 10;
+        // int indexOfDataSent = sendbase;
+        
+        // while(indexOfDataSent < sendMax) {
+        //     byte[] nextPktPayload = new byte[10];
+        //     int startPoint = indexOfDataSent;
+        //     for (int i = 0; i < bytesForEachPacket; i++){
+        //         indexOfDataSent+=i;
+        //         nextPktPayload[i] = socketBuffer[indexOfDataSent];
+        //     }
+        //     Transport nextPkt = new Transport(srcPort, destPort, 3, 999, startPoint, nextPktPayload); // window size doesn't matter for data sent
+        //     tcpMan.node.sendSegment(srcAddr, destAddr, Protocol.TRANSPORT_PKT, nextPkt.pack());
+        // } 
+        
+        //v2
+        // int bytesForEachPacket = 10;
+        // int indexOfDataSent = sendMax;
+        // this.swnd = sendMax - sendbase;
+
+        // while(indexOfDataSent < rwnd - swnd) {
+        //     byte[] nextPktPayload = new byte[10];
+        //     int startPoint = indexOfDataSent;
+        //     for (int i = 0; i < bytesForEachPacket; i++){
+        //         indexOfDataSent+=i;
+        //         nextPktPayload[i] = socketBuffer[indexOfDataSent];
+        //     }
+        //     Transport nextPkt = new Transport(srcPort, destPort, 3, 999, startPoint, nextPktPayload); // window size doesn't matter for data sent
+        //     tcpMan.node.sendSegment(srcAddr, destAddr, Protocol.TRANSPORT_PKT, nextPkt.pack());
+        // } 
+
+        // int bytesForEachPacket = 10;
+        // int indexOfDataSent = sendMax;
+        // this.swnd = sendMax - sendbase;
+
+        // while(sendMax < sendbase + cwnd && sendMax < sendbase + rwnd && sendMax < writePointer) {
+        //     byte[] nextPktPayload = new byte[10];
+        //     int startPoint = indexOfDataSent;
+        //     for (int i = 0; i < bytesForEachPacket; i++){
+        //         indexOfDataSent+=i;
+        //         nextPktPayload[i] = socketBuffer[indexOfDataSent];
+        //     }
+        //     Transport nextPkt = new Transport(srcPort, destPort, 3, 999, startPoint, nextPktPayload); // window size doesn't matter for data sent
+        //     tcpMan.node.sendSegment(srcAddr, destAddr, Protocol.TRANSPORT_PKT, nextPkt.pack());
+        // } 
+        
+        //v4
+        // int bytesForEachPacket = 10;
+        int indexOfDataSent = sendMax;
+        this.swnd = sendMax - sendbase;
+        //this.tcpMan.node.logOutput("sendbase + cwnd " + String.valueOf(sendbase + cwnd));
+        while(sendMax < sendbase + cwnd && sendMax < sendbase + rwnd && sendMax < writePointer) {
+            int minFlowReceiver = sendMax + rwnd;
+            if (minFlowReceiver > writePointer) {
+                minFlowReceiver = (writePointer - sendMax) % bufferSz;
+            }
+            else {
+                minFlowReceiver = rwnd;
+            }
+
+            int minPktSize = Math.min(Math.min(cwnd - sendMax, minFlowReceiver), Math.min(Transport.MAX_PACKET_SIZE, writePointer - sendMax));
+            //tcpMan.node.logOutput("rwnd " + rwnd + " cwnd " + cwnd + " write pointer " + String.valueOf(writePointer) + " sendbase " + 
+                //String.valueOf(sendbase) + " sendmax " + String.valueOf(sendMax));
+            byte[] nextPktPayload = new byte[minPktSize];
+            if (minPktSize == 0) return;
+            int startPoint = indexOfDataSent;
+            for (int i = 0; i < minPktSize; i++){
+                nextPktPayload[i] = socketBuffer[indexOfDataSent % bufferSz];
+                //tcpMan.node.logOutput("entering buf " + socketBuffer[indexOfDataSent % bufferSz]);
+                indexOfDataSent++;
+            }
+            sendMax = indexOfDataSent;
+
+            //tcpMan.node.logOutput("length of payload " + nextPktPayload.length);
+            Transport nextPkt = new Transport(srcPort, destPort, 3, 999, startPoint, nextPktPayload); // window size doesn't matter for data sent
+            //tcpMan.node.logOutput("seq outgoing packet " + startPoint);
+            
+            sendDataRT(nextPkt);
+            //tcpMan.node.sendSegment(srcAddr, destAddr, Protocol.TRANSPORT_PKT, nextPkt.pack());
+        } 
+    }
+
+    public void sendDataRT(Transport pkt){
+        if (sendbase >= pkt.getSeqNum() + pkt.getPayload().length){
+            return;
+        }
+        try {
+            //tcpMan.node.logOutput("about to send segment! ");
+            tcpMan.node.sendSegment(srcAddr, destAddr, Protocol.TRANSPORT_PKT, pkt.pack());
+            if ((writePointer == sendbase) && (sendbase == sendMax) && (this.state == State.SHUTDOWN)){
+                this.state = State.CLOSED;
+                rcvFinAck = true;
+                return;
+            }
+            //System.console().writer().println(".");
+            String[] paramTypes = { "Transport" };
+            Object[] params = { pkt };
+            Method method = Callback.getMethod("sendDataRT", this, paramTypes);
+	        Callback cb = new Callback(method, this, params);
+            this.tcpMan.manager.addTimer(this.tcpMan.node.getAddr(), 10000, cb);
+        }
+        catch(Exception e) {
+            System.err.println("Failed to add callback to sendDataRT");
+        }
+    }
+
+    public void writeToReceiveBuffer(byte[] payload){
+        for (int i = 0; i < payload.length; i++){
+            socketBuffer[rWritePointer % bufferSz] = payload[i];
+            //tcpMan.node.logOutput("write to buf result " + socketBuffer[rWritePointer % bufferSz]);
+            rWritePointer++;
+        }
+        
+    }
+
+    public void setSendMax(int new_rwnd){
+        if (sendMax == writePointer){
+            return; // sendMax is unchanged
+        }
+        else if (writePointer - sendbase < new_rwnd){
+            sendMax = writePointer;
+        }
+        else if (writePointer - sendbase > new_rwnd){
+            int swnd = sendMax - sendbase;
+            sendMax += (new_rwnd - swnd);
+        }
+    }
+
+    public void timedWaitRT(Transport pkt){
+        if (tcpMan.manager.now() - startOfTimedWait > 5000){
+            this.state = State.CLOSED;
+            return;
+        }
+        try {
+            //tcpMan.node.logOutput("about to send segment! ");
+            tcpMan.node.sendSegment(srcAddr, destAddr, Protocol.TRANSPORT_PKT, pkt.pack());
+            //System.console().writer().println(".");
+            String[] paramTypes = { "Transport" };
+            Object[] params = { pkt };
+            Method method = Callback.getMethod("timedWaitRT", this, paramTypes);
+	        Callback cb = new Callback(method, this, params);
+            this.tcpMan.manager.addTimer(this.tcpMan.node.getAddr(), 1000, cb);
+        }
+        catch(Exception e) {
+            System.err.println("Failed to add callback to timedWaitRT");
+        }
+    }
+
 
     public void onReceive(Transport transportPkt, Packet pkt){
         int type = transportPkt.getType();
         switch(type){
             case 0: // SYN
+                //System.console().writer().println("S");
                 byte[] transportPktPayload = {};
-                Transport replyPkt = new Transport(transportPkt.getDestPort(), transportPkt.getSrcPort(), 1, 1, 1, transportPktPayload);
+                Transport replyPkt = new Transport(transportPkt.getDestPort(), transportPkt.getSrcPort(), 1, this.bufferSz, 0, transportPktPayload);
                 tcpMan.node.sendSegment(pkt.getDest(), pkt.getSrc(), Protocol.TRANSPORT_PKT, replyPkt.pack());
 
                 TCPSock newSocket = new TCPSock(tcpMan);
                 newSocket.destAddr = pkt.getSrc();
                 newSocket.destPort = transportPkt.getSrcPort();
                 newSocket.srcAddr = pkt.getDest();
-                newSocket.srcPort = pkt.getSrc();
+                newSocket.srcPort = transportPkt.getDestPort();
 
                 backlogSockets.add(newSocket);
+                //this.tcpMan.node.logOutput("SYN RECEIVED. ADDED SOCK TO BACKLOG");
                 break;
+
             case 1: // ACK
-                if (this.state == State.SYN_SENT){
+                //System.console().writer().println(".");
+                //this.tcpMan.node.logOutput("SOME ACK RECEIVED");
+                if (this.state == State.SYN_SENT && pkt.getSeq() == 0){
+                    //setSendMax(transportPkt.getWindow());
+                    //this.sendMax = transportPkt.getWindow();
+                    this.sendbase = transportPkt.getSeqNum();
+                    this.cwnd = sendbase + cwnd;
+                    this.rwnd = transportPkt.getWindow();
                     this.state = State.ESTABLISHED;
+                    //this.tcpMan.node.logOutput("INITIAL CONNECTION SEQ WANTED " + String.valueOf(transportPkt.getSeqNum()));
+                    transmitData();
+                    //this.tcpMan.node.logOutput("CONNECTION ESTABLISHED. ACK RECEIVED");
+                }
+                else if (this.state == State.ESTABLISHED || this.state == State.SHUTDOWN){
+                    this.rwnd = transportPkt.getWindow();
+                    int change = transportPkt.getSeqNum() - sendbase;
+                    this.sendbase = transportPkt.getSeqNum();
+                    this.cwnd = sendbase + change;
+                    // setSendMax(transportPkt.getWindow());
+                    //this.tcpMan.node.logOutput("got your ACK, my sendbase is now " + String.valueOf(transportPkt.getSeqNum()));
+                    //this.tcpMan.node.logOutput("my sendmax is now " + String.valueOf(sendMax));
+                    //this.tcpMan.node.logOutput("wp is now " + String.valueOf(writePointer));
+                    transmitData();
                 }
                 break;
+
             case 2: // FIN
+                //System.console().writer().println("F");
+                byte[] emptyClosePayload = {};
+                Transport closeAck = new Transport(transportPkt.getDestPort(), transportPkt.getSrcPort(), 1, 0, 99, emptyClosePayload);
+                startOfTimedWait = this.tcpMan.manager.now();
+                timedWaitRT(closeAck);
                 break;
+
             case 3: // DATA
+                if (transportPkt.getSeqNum() != nextseq) break;
+                byte[] dataToWrite = transportPkt.getPayload();
+                //tcpMan.node.logOutput("LENGTH OF DATA RECEIVED " + String.valueOf(dataToWrite.length));
+                writeToReceiveBuffer(dataToWrite);
+                byte[] emptyAckPayload = {};
+                int remainingReceivingBufferSz = bufferSz - ( (rWritePointer - rReadPointer) % bufferSz);
+                int returnedSeq = transportPkt.getSeqNum() + transportPkt.getPayload().length;
+                nextseq = returnedSeq;
+                Transport replyAck = new Transport(transportPkt.getDestPort(), transportPkt.getSrcPort(), 1, remainingReceivingBufferSz, returnedSeq, emptyAckPayload);
+                tcpMan.node.sendSegment(pkt.getDest(), pkt.getSrc(), Protocol.TRANSPORT_PKT, replyAck.pack());
+                //this.tcpMan.node.logOutput("got DATA, next incoming should be " + String.valueOf(returnedSeq));
+                //this.tcpMan.node.logOutput("remaining rec buf sz is " + String.valueOf(remainingReceivingBufferSz));
                 break;
         }
     }

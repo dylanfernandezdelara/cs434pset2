@@ -72,16 +72,21 @@ public class TransferClient extends FishThread {
 
             //node.logOutput("sending...");
             int index = pos % buf.length;
+            // node.logOutput(String.valueOf(index));
+            //node.logOutput(String.valueOf(buf.length));
 
             if (index == 0) {
                 // generate new data
                 for (int i = 0; i < buf.length; i++) {
                     buf[i] = (byte) i;
+                    //node.logOutput(String.valueOf(buf[i]));
                 }
             }
 
             int len = Math.min(buf.length - index, amount);
             int count = sock.write(buf, index, len);
+
+            //node.logOutput(String.valueOf(count));
 
             if (count == -1) {
                 // on error, release the socket immediately
@@ -96,7 +101,8 @@ public class TransferClient extends FishThread {
 
             pos += count;
             amount -= count;
-
+            
+            //node.logOutput("amount left to transfer = " + amount);
             //node.logOutput("time = " + manager.now());
             //node.logOutput("bytes sent = " + count);
             return;

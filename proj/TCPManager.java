@@ -15,7 +15,7 @@ import java.util.ArrayList;
 public class TCPManager {
     public Node node;
     public int addr;
-    private Manager manager;
+    public Manager manager;
     public ArrayList<TCPSock> tcpSocksInUse; 
 
     private static final byte dummy[] = new byte[0];
@@ -65,19 +65,23 @@ public class TCPManager {
         int srcPort = TRANSPORTpkt.getSrcPort();
         int srcAddr = packet.getSrc();
 
+        //node.logOutput("SIZE OF SOCKETS IN USE " + String.valueOf(tcpSocksInUse.size()));
+        //node.logOutput("RECEIVED: " + String.valueOf(TRANSPORTpkt.getType()));
         for (int i = 0; i < tcpSocksInUse.size(); i++){
             TCPSock tempSock = tcpSocksInUse.get(i);
-            if (tempSock.state == TCPSock.State.ESTABLISHED && (tempSock.destAddr == srcAddr) && (tempSock.destPort == srcPort)
+            if ( (tempSock.destAddr == srcAddr) && (tempSock.destPort == srcPort)
                     && (tempSock.srcAddr == destAddr) && (tempSock.srcPort == destPort)){
+                //node.logOutput("ONRECEIVE FOR " + String.valueOf(TRANSPORTpkt.getType()));
                 tempSock.onReceive(TRANSPORTpkt, packet);
                 return;
             }
         }
-        
+
         for (int i = 0; i < tcpSocksInUse.size(); i++){
             TCPSock tempSock = tcpSocksInUse.get(i);
             if (tempSock.state == TCPSock.State.LISTEN && (tempSock.srcPort == destPort) ){
                 tempSock.onReceive(TRANSPORTpkt, packet);
+                //node.logOutput("ONRECEIVE FOR " + String.valueOf(TRANSPORTpkt.getType()));
                 return;
             }
         }

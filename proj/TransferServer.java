@@ -116,8 +116,10 @@ public class TransferServer extends FishThread {
                 }
 
                 if (count > 0) {
+                    //node.logOutput("index : " + index );
                     //node.logOutput("verifying data...");
                     for (int i = index; i < index + count; i++) {
+                        //node.logOutput("buf[i], i, " + String.valueOf(buf[i]) + " " +String.valueOf((byte)i));
                         if (buf[i] != (byte) i) {
                             // data corrupted
                             node.logError("time = " + manager.now() + " msec");
@@ -134,7 +136,7 @@ public class TransferServer extends FishThread {
                 pos += count;
 
                 //node.logOutput("time = " + manager.now() + " msec");
-                //node.logOutput("bytes received = " + count);
+                // node.logOutput("bytes received = " + count);
                 return;
             }
 
