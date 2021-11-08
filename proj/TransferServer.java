@@ -123,6 +123,7 @@ public class TransferServer extends FishThread {
                         if (buf[i] != (byte) i) {
                             // data corrupted
                             node.logError("time = " + manager.now() + " msec");
+                            //node.logOutput("CORRUPTION ON : " + i );
                             node.logError("data corruption detected");
                             node.logError("position = " + pos);
                             node.logError("releasing connection...");
@@ -136,7 +137,7 @@ public class TransferServer extends FishThread {
                 pos += count;
 
                 //node.logOutput("time = " + manager.now() + " msec");
-                // node.logOutput("bytes received = " + count);
+                //node.logOutput("bytes received = " + count);
                 return;
             }
 

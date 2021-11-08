@@ -1,4 +1,4 @@
-edge 0 1 lossRate 0.05 delay 0 bw 10000 bt 1000
+edge 0 1 lossRate 0.10 delay 0 bw 10000 bt 1000
 time + 5
 # server port backlog [servint workint sz]
 0 server 21 2

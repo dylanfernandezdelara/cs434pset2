@@ -20,10 +20,13 @@ import java.util.ArrayList;
 public class TCPSock {
     // TCPManager of Socket
     TCPManager tcpMan;
+    Transport mostRecentlySentPkt;
     public int srcPort;
     public int destPort;
     public int srcAddr;
     public int destAddr;
+
+    public int ccAlgorithm; // 0 is Reno, 1 is Cubic
 
     public boolean rcvFinAck;
 
@@ -43,8 +46,6 @@ public class TCPSock {
     int rReadPointer;
     int rWritePointer;
 
-    // sending socket
-
     // windows
     int rwnd; // amount of space receiving buffer has available
     int swnd; // bytes sent but not acked
@@ -58,6 +59,8 @@ public class TCPSock {
     public int nextseq;
     
     public long startOfTimedWait;
+
+    int currDuplicateACKs;
 
     // TCP socket states
     public static enum State {
@@ -91,6 +94,12 @@ public class TCPSock {
         this.rcvFinAck = false;
 
         this.nextseq = 0;
+
+        this.currDuplicateACKs = 0;
+
+        this.ccAlgorithm = 0; //default is Reno
+
+        this.mostRecentlySentPkt = null;
 
         state = State.CLOSED;
     }
@@ -202,6 +211,7 @@ public class TCPSock {
         byte [] emptyPayload = {};
         Transport pkt = new Transport(this.srcPort, destPort, 2, 1, 99, emptyPayload);
         if (rcvFinAck){
+            this.state = State.CLOSED;
             return;
         }
         try {
@@ -369,6 +379,7 @@ public class TCPSock {
         }
         try {
             //tcpMan.node.logOutput("about to send segment! ");
+            this.mostRecentlySentPkt = pkt;
             tcpMan.node.sendSegment(srcAddr, destAddr, Protocol.TRANSPORT_PKT, pkt.pack());
             if ((writePointer == sendbase) && (sendbase == sendMax) && (this.state == State.SHUTDOWN)){
                 this.state = State.CLOSED;
@@ -472,7 +483,18 @@ public class TCPSock {
                     //this.tcpMan.node.logOutput("got your ACK, my sendbase is now " + String.valueOf(transportPkt.getSeqNum()));
                     //this.tcpMan.node.logOutput("my sendmax is now " + String.valueOf(sendMax));
                     //this.tcpMan.node.logOutput("wp is now " + String.valueOf(writePointer));
+                    this.currDuplicateACKs++;
+                    if (ccAlgorithm == 0){
+                        Reno_CC_Algorithm(change);
+                    }
+                    else if (ccAlgorithm == 1){
+                        Cubic_CC_Algorithm(change);
+                    }
                     transmitData();
+                }
+                else if (this.state == State.FIN_SENT){
+                    this.state = State.CLOSED;
+                    return;
                 }
                 break;
 
@@ -485,7 +507,7 @@ public class TCPSock {
                 break;
 
             case 3: // DATA
-                if (transportPkt.getSeqNum() != nextseq) break;
+                if (transportPkt.getSeqNum() != nextseq) tcpMan.node.sendSegment(pkt.getDest(), pkt.getSrc(), Protocol.TRANSPORT_PKT, mostRecentlySentPkt.pack());
                 byte[] dataToWrite = transportPkt.getPayload();
                 //tcpMan.node.logOutput("LENGTH OF DATA RECEIVED " + String.valueOf(dataToWrite.length));
                 writeToReceiveBuffer(dataToWrite);
@@ -499,6 +521,34 @@ public class TCPSock {
                 //this.tcpMan.node.logOutput("remaining rec buf sz is " + String.valueOf(remainingReceivingBufferSz));
                 break;
         }
+    }
+
+    public void set_cc_algorithm(int type){
+        if (type == 0){
+            ccAlgorithm = 0;
+        }
+        else if (type == 1){
+            ccAlgorithm = 1;
+        }
+    }
+
+    public void Reno_CC_Algorithm(int bytesAcked){
+        Packet mss = new Packet(destAddr, srcAddr, 1, Protocol.TRANSPORT_PKT, 0, null);
+        byte [] mss_bytes = mss.pack();
+        int sz_mss = mss_bytes.length;
+        if (this.currDuplicateACKs == 3){
+            currDuplicateACKs = 0;
+            this.cwnd = cwnd / 2;
+        }
+        else {
+            // cwnd += bytes_acked/cwnd * MSS
+            cwnd += (bytesAcked / cwnd * sz_mss);
+        }
+    }
+
+    public void Cubic_CC_Algorithm(int bytesAcked){
+        // unfortunately, did not have time to complete Cubic
+        // this pset was exceptionally difficult, but I enjoyed the challenge. Given more time, this pset would have been even better.
     }
 
     /*
