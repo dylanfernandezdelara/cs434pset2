@@ -20,10 +20,13 @@ import java.util.ArrayList;
 public class TCPSock {
     // TCPManager of Socket
     TCPManager tcpMan;
+    // Transport mostRecentlySentPkt;
     public int srcPort;
     public int destPort;
     public int srcAddr;
     public int destAddr;
+
+    // public int ccAlgorithm; // 0 is Reno, 1 is Cubic
 
     public boolean rcvFinAck;
 
@@ -43,8 +46,6 @@ public class TCPSock {
     int rReadPointer;
     int rWritePointer;
 
-    // sending socket
-
     // windows
     int rwnd; // amount of space receiving buffer has available
     int swnd; // bytes sent but not acked
@@ -58,6 +59,8 @@ public class TCPSock {
     public int nextseq;
     
     public long startOfTimedWait;
+
+    // int currDuplicateACKs;
 
     // TCP socket states
     public static enum State {
@@ -91,6 +94,12 @@ public class TCPSock {
         this.rcvFinAck = false;
 
         this.nextseq = 0;
+
+        // this.currDuplicateACKs = 0;
+
+        // this.ccAlgorithm = 0; //default is Reno
+
+        // this.mostRecentlySentPkt = null;
 
         state = State.CLOSED;
     }
@@ -153,7 +162,7 @@ public class TCPSock {
     }
 
     public boolean isClosurePending() {
-        return (state == State.SHUTDOWN);
+        return (state == State.SHUTDOWN || state == State.FIN_SENT);
     }
 
     /**
@@ -183,10 +192,13 @@ public class TCPSock {
      */
     public void close() {
         // waits for all data to be sent then sends the fin
+        // this.state = State.CLOSED;
         this.state = State.SHUTDOWN; // state transfers to CLOSED once wp == sendmax == sendbase
+        tcpMan.node.logOutput("wp: " + writePointer + " sendmax: " + sendMax + " sendbase: " + sendbase + "\n");
         if ( (writePointer == sendMax) && (sendMax == sendbase) ){
-            sendFinRT();
+            tcpMan.node.logOutput("SWITCHING STATE TO CLOSED");
             this.state = State.CLOSED;
+            sendFinRT();
         } 
     }
 
@@ -202,6 +214,7 @@ public class TCPSock {
         byte [] emptyPayload = {};
         Transport pkt = new Transport(this.srcPort, destPort, 2, 1, 99, emptyPayload);
         if (rcvFinAck){
+            this.state = State.CLOSED;
             return;
         }
         try {
@@ -364,11 +377,13 @@ public class TCPSock {
     }
 
     public void sendDataRT(Transport pkt){
+        //tcpMan.node.logOutput("sendbase is: " + sendbase + "\n" + "seqnum + payload is :" + pkt.getSeqNum() + pkt.getPayload().length + "\n\n");
         if (sendbase >= pkt.getSeqNum() + pkt.getPayload().length){
             return;
         }
         try {
             //tcpMan.node.logOutput("about to send segment! ");
+            // this.mostRecentlySentPkt = pkt;
             tcpMan.node.sendSegment(srcAddr, destAddr, Protocol.TRANSPORT_PKT, pkt.pack());
             if ((writePointer == sendbase) && (sendbase == sendMax) && (this.state == State.SHUTDOWN)){
                 this.state = State.CLOSED;
@@ -384,6 +399,26 @@ public class TCPSock {
         }
         catch(Exception e) {
             System.err.println("Failed to add callback to sendDataRT");
+        }
+    }
+
+    public void sendACK_RT(Transport replyAck, Packet pkt){
+        if (nextseq > replyAck.getSeqNum() + replyAck.getPayload().length){
+            return;
+        }
+        try {
+            //tcpMan.node.logOutput("about to send segment! ");
+            // this.mostRecentlySentPkt = pkt;
+            tcpMan.node.sendSegment(pkt.getDest(), pkt.getSrc(), Protocol.TRANSPORT_PKT, replyAck.pack());
+            //System.console().writer().println(".");
+            String[] paramTypes = { "Transport", "Packet" };
+            Object[] params = {replyAck, pkt};
+            Method method = Callback.getMethod("sendACK_RT", this, paramTypes);
+	        Callback cb = new Callback(method, this, params);
+            this.tcpMan.manager.addTimer(this.tcpMan.node.getAddr(), 10000, cb);
+        }
+        catch(Exception e) {
+            System.err.println("Failed to add callback to sendACK_RT");
         }
     }
 
@@ -410,13 +445,14 @@ public class TCPSock {
     }
 
     public void timedWaitRT(Transport pkt){
-        if (tcpMan.manager.now() - startOfTimedWait > 5000){
+        if (tcpMan.manager.now() - startOfTimedWait > 10000){
             this.state = State.CLOSED;
             return;
         }
         try {
             //tcpMan.node.logOutput("about to send segment! ");
             tcpMan.node.sendSegment(srcAddr, destAddr, Protocol.TRANSPORT_PKT, pkt.pack());
+            this.state = State.CLOSED;
             //System.console().writer().println(".");
             String[] paramTypes = { "Transport" };
             Object[] params = { pkt };
@@ -472,7 +508,18 @@ public class TCPSock {
                     //this.tcpMan.node.logOutput("got your ACK, my sendbase is now " + String.valueOf(transportPkt.getSeqNum()));
                     //this.tcpMan.node.logOutput("my sendmax is now " + String.valueOf(sendMax));
                     //this.tcpMan.node.logOutput("wp is now " + String.valueOf(writePointer));
-                    transmitData();
+                //     this.currDuplicateACKs++;
+                //     if (ccAlgorithm == 0){
+                //         Reno_CC_Algorithm(change);
+                //     }
+                //     else if (ccAlgorithm == 1){
+                //         Cubic_CC_Algorithm(change);
+                //     }
+                     transmitData();
+                 }
+                else if (this.state == State.FIN_SENT){
+                    this.state = State.CLOSED;
+                    return;
                 }
                 break;
 
@@ -481,6 +528,7 @@ public class TCPSock {
                 byte[] emptyClosePayload = {};
                 Transport closeAck = new Transport(transportPkt.getDestPort(), transportPkt.getSrcPort(), 1, 0, 99, emptyClosePayload);
                 startOfTimedWait = this.tcpMan.manager.now();
+                //this.state = State.CLOSED;
                 timedWaitRT(closeAck);
                 break;
 
@@ -492,14 +540,44 @@ public class TCPSock {
                 byte[] emptyAckPayload = {};
                 int remainingReceivingBufferSz = bufferSz - ( (rWritePointer - rReadPointer) % bufferSz);
                 int returnedSeq = transportPkt.getSeqNum() + transportPkt.getPayload().length;
+                // tcpMan.node.logOutput("RETURNED SEQ "+ returnedSeq + "\n");
                 nextseq = returnedSeq;
                 Transport replyAck = new Transport(transportPkt.getDestPort(), transportPkt.getSrcPort(), 1, remainingReceivingBufferSz, returnedSeq, emptyAckPayload);
-                tcpMan.node.sendSegment(pkt.getDest(), pkt.getSrc(), Protocol.TRANSPORT_PKT, replyAck.pack());
+                sendACK_RT(replyAck, pkt);
+                // tcpMan.node.sendSegment(pkt.getDest(), pkt.getSrc(), Protocol.TRANSPORT_PKT, replyAck.pack());
                 //this.tcpMan.node.logOutput("got DATA, next incoming should be " + String.valueOf(returnedSeq));
                 //this.tcpMan.node.logOutput("remaining rec buf sz is " + String.valueOf(remainingReceivingBufferSz));
                 break;
         }
     }
+
+    // public void set_cc_algorithm(int type){
+    //     if (type == 0){
+    //         ccAlgorithm = 0;
+    //     }
+    //     else if (type == 1){
+    //         ccAlgorithm = 1;
+    //     }
+    // }
+
+    // public void Reno_CC_Algorithm(int bytesAcked){
+    //     Packet mss = new Packet(destAddr, srcAddr, 1, Protocol.TRANSPORT_PKT, 0, null);
+    //     byte [] mss_bytes = mss.pack();
+    //     int sz_mss = mss_bytes.length;
+    //     if (this.currDuplicateACKs == 3){
+    //         currDuplicateACKs = 0;
+    //         this.cwnd = cwnd / 2;
+    //     }
+    //     else {
+    //         // cwnd += bytes_acked/cwnd * MSS
+    //         cwnd += (bytesAcked / cwnd * sz_mss);
+    //     }
+    // }
+
+    // public void Cubic_CC_Algorithm(int bytesAcked){
+    //     // unfortunately, did not have time to complete Cubic
+    //     // this pset was exceptionally difficult, but I enjoyed the challenge. Given more time, this pset would have been even better.
+    // }
 
     /*
      * End of socket API

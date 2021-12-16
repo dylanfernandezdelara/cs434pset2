@@ -107,7 +107,7 @@ public class TransferClient extends FishThread {
             //node.logOutput("bytes sent = " + count);
             return;
         } else if (sock.isClosurePending()) {
-            //node.logOutput("closing connection...");
+            node.logOutput("closing connection...");
             return;
         } else if (sock.isClosed()) {
             finishTime = manager.now();
@@ -122,6 +122,8 @@ public class TransferClient extends FishThread {
             this.stop();
             return;
         }
+
+        node.logOutput("state " + sock.state + "\n");
 
         node.logError("shouldn't reach here");
         System.exit(1);
